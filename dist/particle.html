@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Neon Hand-Controlled Particles</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+        #video-container { position: absolute; top: 10px; left: 10px; z-index: 2; opacity: 0.8; transform: scaleX(-1); }
+        video { width: 160px; height: 120px; border-radius: 8px; border: 2px solid #00ffcc; box-shadow: 0 0 15px #00ffcc; }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #00ffcc; font-size: 24px; z-index: 10; font-weight: bold; text-shadow: 0 0 10px #00ffcc; }
+        #ui { position: absolute; bottom: 20px; left: 20px; color: #fff; z-index: 2; background: rgba(0,0,0,0.6); padding: 15px; border-radius: 12px; border: 1px solid #333; pointer-events: none;}
+        h3 { margin: 0 0 10px 0; color: #00ffcc; }
+    </style>
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+<div id="loading">✨ Initializing Magic Particles...</div>
+<div id="canvas-container"></div>
+<div id="video-container">
+    <video id="input_video"></video>
+</div>
+<div id="ui">
+    <h3>Gestures</h3>
+    ✊ <b>Fist:</b> Heart ❤️<br>
+    ☝️ <b>1 Finger:</b> Flower 🌸<br>
+    ✌️ <b>2 Fingers:</b> Saturn 🪐<br>
+    🤟 <b>3 Fingers:</b> Firework 🎆<br>
+    🖖 <b>4 Fingers:</b> OM (🕉️)<br>
+    🖐 <b>5 Fingers:</b> RAM (राम)<br>
+    <small><i>Move hand to change Color & Rotation</i></small>
+</div>
+
+<script>
+    // --- Configuration ---
+    const PARTICLE_COUNT = 4000; // Increased count for density
+    const PARTICLE_SIZE = 0.25;  // Increased size for brightness
+    const CANVAS_WIDTH = 100;
+    const CANVAS_HEIGHT = 100;
+
+    // --- State ---
+    let currentShape = 'heart';
+    let targetPositions = [];
+    let currentPositions = [];
+    let time = 0;
+    let expansionFactor = 1;
+    let handCentroid = { x: 0.5, y: 0.5 };
+    
+    // Three.js Globals
+    let scene, camera, renderer, particlesMesh;
+
+    // Helper Canvas for Text Analysis
+    const textCanvas = document.createElement('canvas');
+    const ctx = textCanvas.getContext('2d');
+    textCanvas.width = CANVAS_WIDTH;
+    textCanvas.height = CANVAS_HEIGHT;
+
+    // --- 1. Procedural Glow Texture ---
+    // Creating a texture in code ensures it's perfectly white and glowing
+    function createGlowTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 32; canvas.height = 32;
+        const context = canvas.getContext('2d');
+        const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
+        // Pure White Center
+        gradient.addColorStop(0, 'rgba(255,255,255,1)'); 
+        // Fade out
+        gradient.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+        gradient.addColorStop(1, 'rgba(0,0,0,0)');
+        context.fillStyle = gradient;
+        context.fillRect(0,0,32,32);
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    // --- 2. Three.js Setup ---
+    function initThree() {
+        scene = new THREE.Scene();
+        // Removed Fog to keep distant particles bright
+
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 28;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // Arrays
+        const posArray = new Float32Array(PARTICLE_COUNT * 3);
+        const colorArray = new Float32Array(PARTICLE_COUNT * 3);
+
+        for(let i = 0; i < PARTICLE_COUNT; i++) {
+            currentPositions.push(0, 0, 0);
+            targetPositions.push(0, 0, 0);
+            
+            // Start white
+            colorArray[i*3] = 1;
+            colorArray[i*3+1] = 1;
+            colorArray[i*3+2] = 1;
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: PARTICLE_SIZE,
+            map: createGlowTexture(),
+            vertexColors: true,
+            // AdditiveBlending is KEY for the "Glow" effect
+            blending: THREE.AdditiveBlending, 
+            depthWrite: false, // Allows transparency to stack
+            transparent: true,
+            opacity: 1.0
+        });
+
+        particlesMesh = new THREE.Points(geometry, material);
+        scene.add(particlesMesh);
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        calculateShape('heart');
+        animate();
+    }
+
+    // --- 3. Shape Calculations ---
+    function getPointOnHeart(t) {
+        t = t * Math.PI * 2;
+        const x = 16 * Math.pow(Math.sin(t), 3);
+        const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+        return { x: x * 0.5, y: y * 0.5, z: (Math.random() - 0.5) * 5 };
+    }
+
+    function getPointOnSphere(i) {
+        const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+        const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+        const r = 10;
+        return {
+            x: r * Math.cos(theta) * Math.sin(phi),
+            y: r * Math.sin(theta) * Math.sin(phi),
+            z: r * Math.cos(phi)
+        };
+    }
+
+    function calculateShape(type) {
+        targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        
+        // --- TEXT SHAPES ---
+        if(type === 'om' || type === 'ram') {
+             ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+             ctx.fillStyle = 'black'; // Background
+             ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
+             ctx.fillStyle = 'white'; // Text
+             ctx.font = type === 'om' ? 'bold 80px Arial' : 'bold 70px Arial';
+             ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+             ctx.fillText(type === 'om' ? '🕉️' : 'राम', CANVAS_WIDTH/2, CANVAS_HEIGHT/2);
+             
+             const data = ctx.getImageData(0,0,CANVAS_WIDTH,CANVAS_HEIGHT).data;
+             let valid = [];
+             for(let y=0; y<CANVAS_HEIGHT; y+=2) {
+                 for(let x=0; x<CANVAS_WIDTH; x+=2) {
+                     if(data[(y*CANVAS_WIDTH+x)*4]>128) // Check Red channel for white
+                        valid.push({x:(x-CANVAS_WIDTH/2)*0.35, y:-(y-CANVAS_HEIGHT/2)*0.35});
+                 }
+             }
+             
+             for(let i=0; i<PARTICLE_COUNT; i++) {
+                 const p = valid[i%valid.length] || {x:0, y:0};
+                 // Add jitter to make text look "fiery"
+                 targetPositions[i*3] = p.x + (Math.random()-0.5)*0.3;
+                 targetPositions[i*3+1] = p.y + (Math.random()-0.5)*0.3;
+                 targetPositions[i*3+2] = (Math.random()-0.5)*1.5;
+             }
+        } 
+        // --- GEOMETRIC SHAPES ---
+        else {
+             for(let i=0; i<PARTICLE_COUNT; i++) {
+                let p = {x:0, y:0, z:0};
+                if(type==='heart') p = getPointOnHeart(i/PARTICLE_COUNT);
+                if(type==='flower') {
+                    const theta = (i/PARTICLE_COUNT)*Math.PI*20; 
+                    const r = 10*Math.cos(4*theta);
+                    p={x:r*Math.cos(theta), y:r*Math.sin(theta), z:(Math.random()-0.5)*5};
+                }
+                if(type==='saturn') {
+                    if(i < PARTICLE_COUNT*0.4) {
+                        const sp = getPointOnSphere(i);
+                        p={x:sp.x*0.6, y:sp.y*0.6, z:sp.z*0.6};
+                    } else {
+                        const ang = i*0.1; const d = 9 + Math.random()*5;
+                        p={x:Math.cos(ang)*d, z:Math.sin(ang)*d, y:(Math.random()-0.5)*0.5};
+                        // Tilt
+                        let ty = p.y*Math.cos(0.4) - p.z*Math.sin(0.4);
+                        let tz = p.y*Math.sin(0.4) + p.z*Math.cos(0.4);
+                        p.y=ty; p.z=tz;
+                    }
+                }
+                if(type==='firework') {
+                     const r = 12 * Math.cbrt(Math.random());
+                     const theta = Math.random() * Math.PI * 2;
+                     const phi = Math.acos(2 * Math.random() - 1);
+                     p={x:r*Math.sin(phi)*Math.cos(theta), y:r*Math.sin(phi)*Math.sin(theta), z:r*Math.cos(phi)};
+                }
+                targetPositions[i*3] = p.x;
+                targetPositions[i*3+1] = p.y;
+                targetPositions[i*3+2] = p.z;
+             }
+        }
+    }
+
+    // --- 4. Animation Loop ---
+    function animate() {
+        requestAnimationFrame(animate);
+        time += 0.015;
+
+        const positions = particlesMesh.geometry.attributes.position.array;
+        const colorsAttribute = particlesMesh.geometry.attributes.color.array;
+
+        // Smooth Rotation based on Hand
+        particlesMesh.rotation.y = THREE.MathUtils.lerp(particlesMesh.rotation.y, (handCentroid.x - 0.5) * 3, 0.08);
+        particlesMesh.rotation.x = THREE.MathUtils.lerp(particlesMesh.rotation.x, (handCentroid.y - 0.5) * 3, 0.08);
+
+        // Breathing & Scale
+        const breathe = 1 + Math.sin(time * 3) * 0.05;
+        const finalScale = expansionFactor * breathe;
+        
+        // Color Shift based on Hand X
+        const hueShift = handCentroid.x * 0.5; 
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const ix = i * 3;
+            
+            // Movement Logic
+            const lerpSpeed = 0.08;
+            positions[ix]   += (targetPositions[ix] * finalScale - positions[ix]) * lerpSpeed;
+            positions[ix+1] += (targetPositions[ix+1] * finalScale - positions[ix+1]) * lerpSpeed;
+            positions[ix+2] += (targetPositions[ix+2] * finalScale - positions[ix+2]) * lerpSpeed;
+
+            // --- BRIGHT NEON COLOR LOGIC ---
+            const color = new THREE.Color();
+            
+            // High Lightness (L) values make it appear to glow against black
+            // Saturation (S) at 1.0 ensures vivid colors
+            if(currentShape === 'heart') color.setHSL(0.98, 1.0, 0.6); // Neon Red/Pink
+            else if(currentShape === 'flower') color.setHSL(Math.abs(Math.sin(time*0.5 + positions[ix]*0.1)), 1.0, 0.65); 
+            else if(currentShape === 'saturn') color.setHSL(0.12, 1.0, 0.6); // Neon Gold
+            else if(currentShape === 'firework') color.setHSL(Math.random(), 1.0, 0.7); // Sparkling
+            else if(currentShape === 'om') color.setHSL(0.08, 1.0, 0.6); // Neon Saffron
+            else color.setHSL(0.6, 1.0, 0.7); // Neon Cyan (RAM)
+
+            // Dynamic Hue Shift from Hand
+            let h, s, l;
+            const hsl = {};
+            color.getHSL(hsl);
+            // Mix original hue with hand hue
+            color.setHSL((hsl.h + hueShift)%1, hsl.s, hsl.l);
+
+            colorsAttribute[ix]   = color.r;
+            colorsAttribute[ix+1] = color.g;
+            colorsAttribute[ix+2] = color.b;
+        }
+
+        particlesMesh.geometry.attributes.position.needsUpdate = true;
+        particlesMesh.geometry.attributes.color.needsUpdate = true;
+
+        renderer.render(scene, camera);
+    }
+
+    // --- 5. Hand Tracking Logic ---
+    const videoElement = document.getElementById('input_video');
+
+    function onResults(results) {
+        document.getElementById('loading').style.display = 'none';
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+            
+            // Centroid
+            handCentroid = { x: 1 - landmarks[9].x, y: landmarks[9].y }; 
+
+            // Count Fingers
+            let fingersUp = 0;
+            // Thumb
+            if (landmarks[4].x < landmarks[3].x && handCentroid.x > 0.5) fingersUp++; // Right hand approx
+            else if (landmarks[4].x > landmarks[3].x && handCentroid.x < 0.5) fingersUp++; // Left hand approx
+            // Fingers
+            if (landmarks[8].y < landmarks[6].y) fingersUp++; 
+            if (landmarks[12].y < landmarks[10].y) fingersUp++; 
+            if (landmarks[16].y < landmarks[14].y) fingersUp++; 
+            if (landmarks[20].y < landmarks[18].y) fingersUp++; 
+
+            // Shape Mapping
+            let newShape = currentShape;
+            // 0 fingers = Heart, 1 = Flower, etc.
+            if (fingersUp === 0 || fingersUp === 5) {
+                // Check if it's a closed fist (0) or open hand (5)
+                // We use simplified logic here. 
+                // Let's rely on the landmarks tip distance to palm for robustness
+                const dTip = Math.sqrt(Math.pow(landmarks[8].x-landmarks[0].x,2) + Math.pow(landmarks[8].y-landmarks[0].y,2));
+                if(dTip < 0.2) newShape = 'heart'; // Fist
+                else if (fingersUp === 5) newShape = 'ram';
+            }
+            if (fingersUp === 1) newShape = 'flower';
+            if (fingersUp === 2) newShape = 'saturn';
+            if (fingersUp === 3) newShape = 'firework';
+            if (fingersUp === 4) newShape = 'om';
+
+            if (newShape !== currentShape) {
+                currentShape = newShape;
+                calculateShape(currentShape);
+            }
+
+            // Pinch to Zoom
+            const thumbTip = landmarks[4];
+            const indexTip = landmarks[8];
+            const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+            // Map 0.05 - 0.3 to scale 0.5 - 2.5
+            expansionFactor = THREE.MathUtils.clamp(pinchDist * 7, 0.5, 3.0);
+        }
+    }
+
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+    hands.onResults(onResults);
+
+    const cameraUtils = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({image: videoElement}); },
+        width: 640, height: 480
+    });
+
+    initThree();
+    cameraUtils.start();
+
+</script>
+</body>
+</html>
